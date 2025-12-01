@@ -1,0 +1,107 @@
+name: Deploy Gateway
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+env:
+  # Config environment variables (Defaults taken from your script, overridable via Repo Variables)
+  HOST: ${{ vars.HOST }}
+  PORT: ${{ vars.PORT }}
+  SSH_USER: ${{ vars.SSH_USER }}
+  
+  # Paths
+  GATEWAY_DIR: "."
+  LOCAL_BINARY_REL: "target/release/camaracapoeira-gateway"
+  REMOTE_DEPLOY_DIR: ${{ vars.REMOTE_DEPLOY_DIR  }}
+  REMOTE_DEPLOY_SCRIPT: ${{ vars.REMOTE_DEPLOY_SCRIPT }}
+  
+  # Flags
+  CLEANUP_REMOTE_TMP: "1"
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Cache (Optional but recommended)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build Release Binary
+        run: |
+          echo "Building binary..."
+          cd ${{ env.GATEWAY_DIR }}
+          cargo build --release
+
+      - name: Deploy via SSH
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          # 1. Setup SSH Key
+          echo "Setting up SSH key..."
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > private_key.pem
+          chmod 600 private_key.pem
+          
+          # 2. Add Host to known_hosts to avoid interactive prompt
+          ssh-keyscan -p ${{ env.PORT }} -H ${{ env.HOST }} >> ~/.ssh/known_hosts
+
+          # 3. Define Binary Path
+          LOCAL_BINARY_PATH="${{ env.GATEWAY_DIR }}/${{ env.LOCAL_BINARY_REL }}"
+          
+          if [[ ! -f "$LOCAL_BINARY_PATH" ]]; then
+            echo "::error::Binary not found at $LOCAL_BINARY_PATH"
+            exit 1
+          fi
+
+          echo "Found binary: $LOCAL_BINARY_PATH"
+
+          # 4. Create Remote Temp Directory
+          echo "Creating remote temp dir..."
+          # Using -o StrictHostKeyChecking=no as a fallback safety
+          TMP_DIR=$(ssh -i private_key.pem -p ${{ env.PORT }} -o StrictHostKeyChecking=no ${{ env.SSH_USER }}@${{ env.HOST }} "mktemp -d /tmp/deploy_gateway_XXXXXX")
+          
+          if [[ -z "$TMP_DIR" ]]; then
+            echo "::error::Failed to create remote tmp dir"
+            exit 1
+          fi
+          
+          echo "Remote tmp dir created: $TMP_DIR"
+          
+          REMOTE_TMP_PATH="${TMP_DIR}/$(basename "$LOCAL_BINARY_PATH")"
+
+          # 5. Upload Binary
+          echo "Uploading binary to $REMOTE_TMP_PATH..."
+          scp -P ${{ env.PORT }} -i private_key.pem -o StrictHostKeyChecking=no "$LOCAL_BINARY_PATH" "${{ env.SSH_USER }}@${{ env.HOST }}:${REMOTE_TMP_PATH}"
+
+          # 6. Execute Remote Deploy Script
+          # We use -tt to force TTY allocation for sudo
+          DEPLOY_ARG="${{ env.REMOTE_DEPLOY_DIR }}/$(basename "$LOCAL_BINARY_PATH")"
+          
+          echo "Executing remote sudo script..."
+          ssh -tt -i private_key.pem -p ${{ env.PORT }} -o StrictHostKeyChecking=no ${{ env.SSH_USER }}@${{ env.HOST }} "sudo ${{ env.REMOTE_DEPLOY_SCRIPT }} '$DEPLOY_ARG'"
+
+          # 7. Cleanup
+          if [[ "${{ env.CLEANUP_REMOTE_TMP }}" == "1" ]]; then
+            echo "Cleaning up remote tmp dir..."
+            ssh -i private_key.pem -p ${{ env.PORT }} -o StrictHostKeyChecking=no ${{ env.SSH_USER }}@${{ env.HOST }} "rm -rf '$TMP_DIR' || true"
+          fi
+
+          echo "Deployment successful."
+          
+          # Clean up local key
+          rm -f private_key.pem
