@@ -23,6 +23,7 @@ env:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    environment: VPS  # <--- Points to the 'VPS' environment in GitHub Settings
 
     steps:
       - name: Checkout code
