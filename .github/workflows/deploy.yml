@@ -5,25 +5,30 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
-env:
-  # Config environment variables (Defaults taken from your script, overridable via Repo Variables)
-  HOST: ${{ vars.HOST }}
-  PORT: ${{ vars.PORT }}
-  SSH_USER: ${{ vars.SSH_USER }}
-  
-  # Paths
-  GATEWAY_DIR: "."
-  LOCAL_BINARY_REL: "target/release/camaracapoeira-gateway"
-  REMOTE_DEPLOY_DIR: ${{ vars.REMOTE_DEPLOY_DIR  }}
-  REMOTE_DEPLOY_SCRIPT: ${{ vars.REMOTE_DEPLOY_SCRIPT }}
-  
-  # Flags
-  CLEANUP_REMOTE_TMP: "1"
+# env block removed from here to ensure it can access Environment-specific variables
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     environment: VPS  # <--- Points to the 'VPS' environment in GitHub Settings
+
+    # Environment variables moved here so they can access 'vars' from the 'VPS' environment
+    env:
+      # Config environment variables with defaults using || operator.
+      HOST: ${{ vars.HOST || '191.252.192.172' }}
+      PORT: ${{ vars.PORT || '22' }}
+      SSH_USER: ${{ vars.SSH_USER || 'web_camara_capoeira_org_br_gateway_github_deploy' }}
+      
+      # Paths
+      GATEWAY_DIR: "."
+      LOCAL_BINARY_REL: "target/release/camaracapoeira-gateway"
+      
+      # Default paths from original script
+      REMOTE_DEPLOY_DIR: ${{ vars.REMOTE_DEPLOY_DIR || '/srv/www.camaracapoeira.org.br-gateway/.deploy_tmp' }}
+      REMOTE_DEPLOY_SCRIPT: ${{ vars.REMOTE_DEPLOY_SCRIPT || '/usr/local/bin/deploys/web_camara_capoeira_org_br_gateway.bash' }}
+      
+      # Flags
+      CLEANUP_REMOTE_TMP: "1"
 
     steps:
       - name: Checkout code
@@ -59,6 +64,7 @@ jobs:
           chmod 600 private_key.pem
           
           # 2. Add Host to known_hosts to avoid interactive prompt
+          # We scan the host using the defaults provided in 'env' above
           ssh-keyscan -p ${{ env.PORT }} -H ${{ env.HOST }} >> ~/.ssh/known_hosts
 
           # 3. Define Binary Path
@@ -73,7 +79,7 @@ jobs:
 
           # 4. Create Remote Temp Directory
           echo "Creating remote temp dir..."
-          # Using -o StrictHostKeyChecking=no as a fallback safety
+          # Note: strict host key checking is redundant if we did ssh-keyscan, but harmless to keep as fallback
           TMP_DIR=$(ssh -i private_key.pem -p ${{ env.PORT }} -o StrictHostKeyChecking=no ${{ env.SSH_USER }}@${{ env.HOST }} "mktemp -d /tmp/deploy_gateway_XXXXXX")
           
           if [[ -z "$TMP_DIR" ]]; then
@@ -91,7 +97,8 @@ jobs:
 
           # 6. Execute Remote Deploy Script
           # We use -tt to force TTY allocation for sudo
-          DEPLOY_ARG="${{ env.REMOTE_DEPLOY_DIR }}/$(basename "$LOCAL_BINARY_PATH")"
+          # UPDATED: Use the actual temp path where we uploaded the file
+          DEPLOY_ARG="$REMOTE_TMP_PATH"
           
           echo "Executing remote sudo script..."
           ssh -tt -i private_key.pem -p ${{ env.PORT }} -o StrictHostKeyChecking=no ${{ env.SSH_USER }}@${{ env.HOST }} "sudo ${{ env.REMOTE_DEPLOY_SCRIPT }} '$DEPLOY_ARG'"
